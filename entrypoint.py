@@ -42,7 +42,7 @@ TIER_SPECS = {
 }
 
 # 티어 생성 조건: 원본 긴변이 이 값 이상이어야 생성
-TIER_THRESHOLDS = {360: 0, 720: 1280, 1080: 1920, 2160: 3840}
+TIER_THRESHOLDS = {360: 0, 720: 0, 1080: 1920, 2160: 3840}
 
 
 def supabase_callback(payload: dict):
@@ -119,11 +119,11 @@ def get_s3_client():
 
 
 def download_original():
-    """R2에서 원본 영상 다운로드"""
+    """R2에서 원본 영상 병렬 다운로드"""
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    url = SOURCE_URL or f"{R2_PUBLIC_BASE}/original-videos/{VIDEO_ID}.mp4"
 
-    print(f"Downloading original video...")
+    url = SOURCE_URL or f"{R2_PUBLIC_BASE}/original-videos/{VIDEO_ID}.mp4"
+    print("Downloading original video...")
     run(["curl", "-f", "-o", str(INPUT_FILE), "-C", "-",
          "--retry", "5", "--retry-delay", "5", "--retry-max-time", "600", url])
 
@@ -295,13 +295,12 @@ def encode_tier(tier: int, meta: dict):
     cmd += ["-r", str(fps)]
 
     if spec["codec"] == "hevc":
-        cmd += ["-c:v", "hevc_nvenc", "-preset", "p4", "-profile:v", "main"]
+        cmd += ["-c:v", "hevc_nvenc", "-preset", "p2", "-profile:v", "main"]
         cmd += ["-tag:v", "hvc1"]
     else:
-        cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high"]
+        cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-profile:v", "high"]
 
     cmd += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize]
-    cmd += ["-rc-lookahead", "20", "-temporal-aq", "1"]
     cmd += ["-g", str(gop), "-strict_gop", "1", "-bf", "2"]
 
     # 오디오 인코더
@@ -356,13 +355,12 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
         cmd += ["-r", str(fps)]
 
         if spec["codec"] == "hevc":
-            cmd += ["-c:v", "hevc_nvenc", "-preset", "p4", "-profile:v", "main"]
+            cmd += ["-c:v", "hevc_nvenc", "-preset", "p2", "-profile:v", "main"]
             cmd += ["-tag:v", "hvc1"]
         else:
-            cmd += ["-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high"]
+            cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-profile:v", "high"]
 
         cmd += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize]
-        cmd += ["-rc-lookahead", "20", "-temporal-aq", "1"]
         cmd += ["-g", str(gop), "-strict_gop", "1", "-bf", "2"]
         cmd += ["-c:a", "aac", "-b:a", "128k"]
         if not meta["has_audio"]:
@@ -407,7 +405,7 @@ def upload_tier(s3, tier: int):
 
     def _upload(item):
         f, ct = item
-        s3.upload_file(str(f), R2_BUCKET, f"{prefix}/{f.name}", ExtraArgs={"ContentType": ct, "CacheControl": "public, max-age=604800"})
+        s3.upload_file(str(f), R2_BUCKET, f"{prefix}/{f.name}", ExtraArgs={"ContentType": ct, "CacheControl": "public, max-age=2592000"})
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(_upload, files))
@@ -427,6 +425,22 @@ def main():
 
     check_gpu()
 
+    # GPU 모니터링 (백그라운드, 10초 간격)
+    dmon = subprocess.Popen(
+        ["nvidia-smi", "dmon", "-s", "pucvmet", "-d", "10"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+
+    def _print_dmon():
+        for line in dmon.stdout:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                print(f"  [gpu] {line}", flush=True)
+
+    import threading
+    dmon_thread = threading.Thread(target=_print_dmon, daemon=True)
+    dmon_thread.start()
+
     # 1. 다운로드
     t = time.time()
     download_original()
@@ -440,7 +454,7 @@ def main():
     print(f"HLS tiers: {tiers}")
 
     s3 = get_s3_client()
-    remaining_tiers = [t for t in tiers if t != 360]
+    remaining_tiers = [t for t in tiers if t != 720]
 
     def upload_master(tier_list):
         generate_master_m3u8(tier_list, meta)
@@ -448,13 +462,13 @@ def main():
             str(HLS_DIR / "master.m3u8"),
             R2_BUCKET,
             f"hls/{VIDEO_ID}/master.m3u8",
-            ExtraArgs={"ContentType": "application/vnd.apple.mpegurl", "CacheControl": "public, max-age=604800"},
+            ExtraArgs={"ContentType": "application/vnd.apple.mpegurl", "CacheControl": "no-cache"},
         )
 
-    # 4. 360p 인코딩 + 나머지 1:N 인코딩을 병렬 시작
+    # 4. 720p 인코딩 + 나머지 1:N 인코딩을 병렬 시작
     import threading
 
-    remaining_error = [None]  # 나머지 티어 에러 저장용
+    remaining_error = [None]
 
     def encode_remaining():
         try:
@@ -468,20 +482,18 @@ def main():
         remaining_thread = threading.Thread(target=encode_remaining)
         remaining_thread.start()
 
-    # 360p 인코딩 (메인 스레드)
+    # 720p 인코딩 (메인 스레드, 우선순위)
     t = time.time()
-    encode_tier(360, meta)
-    print(f"  [{time.time() - t:.1f}s] 360p encode")
+    encode_tier(720, meta)
+    print(f"  [{time.time() - t:.1f}s] 720p encode")
 
-    # 360p 업로드 + 임시 master.m3u8 (360p만) + 콜백
+    # 720p 업로드 + 임시 master.m3u8 (720p만) + hls-ready 콜백
     t = time.time()
-    upload_tier(s3, 360)
-    upload_master([360])
-    ai_input_url = f"{R2_PUBLIC_BASE}/hls/{VIDEO_ID}/360p/playlist.m3u8"
+    upload_tier(s3, 720)
+    upload_master([720])
     hls_url = f"{R2_PUBLIC_BASE}/hls/{VIDEO_ID}/master.m3u8"
-    supabase_callback({"type": "ai-input-ready", "aiInputUrl": ai_input_url})
     supabase_callback({"type": "hls-ready", "hlsUrl": hls_url})
-    print(f"  [{time.time() - t:.1f}s] 360p upload + master + callbacks")
+    print(f"  [{time.time() - t:.1f}s] 720p upload + master + hls-ready callback")
 
     # 5. 나머지 티어 완료 대기 + 업로드
     if remaining_tiers:
@@ -498,11 +510,10 @@ def main():
         upload_master(tiers)
         print(f"  [{time.time() - t:.1f}s] master.m3u8 updated with all tiers")
 
-    # 8. 정리
+    # 6. 정리
     shutil.rmtree(WORK_DIR, ignore_errors=True)
 
     print(f"Transcoding complete for video: {VIDEO_ID} [{time.time() - t_start:.1f}s total]")
-    print(f"  AI input: {ai_input_url}")
     print(f"  HLS: {hls_url}")
 
 
