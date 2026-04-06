@@ -236,9 +236,8 @@ def determine_tiers(long_side: int) -> list[int]:
 def get_scale_filter(tier: int, is_landscape: bool, is_10bit: bool = False) -> str:
     """scale_cuda 필터 문자열 생성 (10-bit 입력 + H.264 출력 시 nv12 변환 포함)"""
     long = TIER_SPECS[tier]["long_side"]
-    codec = TIER_SPECS[tier]["codec"]
-    # 10-bit 입력을 H.264로 인코딩할 때는 8-bit(nv12)로 변환 필요
-    fmt = ":format=nv12" if is_10bit and codec != "hevc" else ""
+    # 10-bit 입력은 항상 8-bit(nv12)로 변환 (HLS 호환성)
+    fmt = ":format=nv12" if is_10bit else ""
     if is_landscape:
         return f"scale_cuda=w={long}:h=-2{fmt}"
     else:
@@ -301,6 +300,7 @@ def encode_tier(tier: int, meta: dict):
         cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-profile:v", "high"]
 
     cmd += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize]
+    cmd += ["-temporal-aq", "1"]
     cmd += ["-g", str(gop), "-strict_gop", "1", "-bf", "2"]
 
     # 오디오 인코더
@@ -361,6 +361,7 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
             cmd += ["-c:v", "h264_nvenc", "-preset", "p2", "-profile:v", "high"]
 
         cmd += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bufsize]
+        cmd += ["-temporal-aq", "1"]
         cmd += ["-g", str(gop), "-strict_gop", "1", "-bf", "2"]
         cmd += ["-c:a", "aac", "-b:a", "128k"]
         if not meta["has_audio"]:
