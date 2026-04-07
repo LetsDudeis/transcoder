@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential nasm yasm pkg-config git \
     libx264-dev libmp3lame-dev libfdk-aac-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # nv-codec-headers (NVENC/CUVID API 헤더)
@@ -29,6 +30,7 @@ RUN git clone --branch release/7.1 --depth 1 \
         --enable-libx264 \
         --enable-libfdk-aac \
         --enable-libmp3lame \
+        --enable-openssl \
         --extra-cflags="-I/usr/local/cuda/include" \
         --extra-ldflags="-L/usr/local/cuda/lib64" \
     && make -j$(nproc) \
@@ -41,6 +43,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libx264-163 libfdk-aac2 libmp3lame0 \
+    libssl3 \
     curl ca-certificates \
     python3 python3-pip \
     && pip3 install --no-cache-dir boto3 \
