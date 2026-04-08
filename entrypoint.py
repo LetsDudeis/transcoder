@@ -118,12 +118,18 @@ def ffprobe_value(args: list[str]) -> str:
 
 
 def get_s3_client():
+    from botocore.config import Config
     return boto3.client(
         "s3",
         endpoint_url=R2_ENDPOINT,
         aws_access_key_id=R2_ACCESS_KEY,
         aws_secret_access_key=R2_SECRET_KEY,
         region_name="auto",
+        config=Config(
+            retries={"max_attempts": 10, "mode": "adaptive"},
+            connect_timeout=30,
+            read_timeout=600,  # 10분 (대용량 파일 전송용)
+        ),
     )
 
 
@@ -152,7 +158,13 @@ def prepare_workdir():
 
     t = time.time()
     try:
-        s3.download_file(R2_BUCKET, f"original-videos/{VIDEO_ID}.mp4", str(INPUT_FILE))
+        from boto3.s3.transfer import TransferConfig
+        transfer_config = TransferConfig(
+            multipart_chunksize=64 * 1024 * 1024,  # 64MB 청크
+            max_concurrency=16,
+            use_threads=True,
+        )
+        s3.download_file(R2_BUCKET, f"original-videos/{VIDEO_ID}.mp4", str(INPUT_FILE), Config=transfer_config)
     except Exception as e:
         fail(f"Download failed: {e}")
     print(f"  [{time.time() - t:.1f}s] Downloaded: {Path(INPUT_FILE).stat().st_size / 1024 / 1024:.0f}MB")
