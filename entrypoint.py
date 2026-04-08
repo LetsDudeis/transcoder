@@ -71,9 +71,12 @@ def supabase_callback(payload: dict):
 
 def fail(msg: str):
     """에러 콜백 보내고 종료"""
-    print(f"ERROR: {msg}", file=sys.stderr)
+    print(f"ERROR: {msg}")
     supabase_callback({"type": "transcode-failed", "error": msg})
-    sys.exit(1)
+    # GCS/로컬 정리
+    shutil.rmtree(WORK_DIR, ignore_errors=True)
+    shutil.rmtree(GCS_DIR, ignore_errors=True)
+    sys.exit(0)
 
 
 def run(cmd: list[str], **kwargs):
@@ -509,18 +512,26 @@ def main():
 
     # 5. 나머지 티어 1:N 인코딩 + 업로드 (720p 완료 후 시작)
     if remaining_tiers:
-        t = time.time()
-        encode_tiers_1n(remaining_tiers, meta)
-        print(f"  [{time.time() - t:.1f}s] remaining tiers encode")
+        try:
+            t = time.time()
+            encode_tiers_1n(remaining_tiers, meta)
+            print(f"  [{time.time() - t:.1f}s] remaining tiers encode")
 
-        t = time.time()
-        for tier in remaining_tiers:
-            upload_tier(s3, tier)
-            print(f"  [{time.time() - t:.1f}s] {tier}p upload")
+            t = time.time()
+            for tier in remaining_tiers:
+                upload_tier(s3, tier)
+                print(f"  [{time.time() - t:.1f}s] {tier}p upload")
 
-        # master.m3u8을 전체 티어로 업데이트
-        upload_master(tiers)
-        print(f"  [{time.time() - t:.1f}s] master.m3u8 updated with all tiers")
+            # master.m3u8을 전체 티어로 업데이트
+            upload_master(tiers)
+            print(f"  [{time.time() - t:.1f}s] master.m3u8 updated with all tiers")
+        except SystemExit:
+            # 720p는 이미 공유 가능, 나머지만 실패 → failed 보내고 종료
+            print("WARNING: remaining tiers failed, but 720p is available")
+            supabase_callback({"type": "transcode-failed", "error": "remaining tiers failed (720p available)"})
+            shutil.rmtree(WORK_DIR, ignore_errors=True)
+            shutil.rmtree(GCS_DIR, ignore_errors=True)
+            return
 
     # hls-complete 콜백 (모든 티어 완료)
     supabase_callback({"type": "hls-complete", "hlsUrl": hls_url})
