@@ -100,11 +100,11 @@ def run(cmd: list[str], **kwargs):
         proc.wait()
         if proc.returncode != 0:
             stderr = proc.stderr.read()
-            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {stderr[:500]}")
+            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {stderr[-500:]}")
     else:
         result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
         if result.returncode != 0:
-            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {result.stderr[:500]}")
+            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {result.stderr[-500:]}")
         return result
 
 
@@ -151,10 +151,10 @@ def prepare_workdir():
         return
 
     t = time.time()
-    run(["curl", "-f", "-o", str(INPUT_FILE), "-C", "-",
-         "--retry", "5", "--retry-delay", "5", "--retry-max-time", "600", INPUT_URL])
-    if not Path(INPUT_FILE).exists() or Path(INPUT_FILE).stat().st_size == 0:
-        fail("Failed to download original video")
+    try:
+        s3.download_file(R2_BUCKET, f"original-videos/{VIDEO_ID}.mp4", str(INPUT_FILE))
+    except Exception as e:
+        fail(f"Download failed: {e}")
     print(f"  [{time.time() - t:.1f}s] Downloaded: {Path(INPUT_FILE).stat().st_size / 1024 / 1024:.0f}MB")
 
 
