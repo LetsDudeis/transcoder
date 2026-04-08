@@ -13,6 +13,13 @@
 
 ## 1. 트랜스코더 트리거 (Supabase → Cloud Run Job)
 
+### 동시 실행 제한
+
+L4 GPU 할당량: 프로젝트당 리전당 **최대 3개** 동시 실행.
+4개 이상 요청 시 GPU 할당 실패 → Job이 대기하거나 실패할 수 있음.
+Supabase 측에서 동시 실행 수를 관리하거나, 실패 시 재시도 로직 필요.
+(할당량 증가는 GCP에 요청 가능)
+
 ### 인증 방식: GCP 서비스 계정 OAuth2
 
 Edge Function에서 서비스 계정 키로 OAuth2 토큰을 생성하여 Cloud Run Jobs API를 호출합니다.
@@ -303,8 +310,6 @@ AI 분석 상태는 별도 필드로 관리:
 | R2 도메인 | `dev.perfectswing.app` | `perfectswing.app` |
 | Cloud Run Job | `transcoder-dev` | `transcoder` |
 | GCS 버킷 | `perfectswing-transcoder-scratch` | 공용 가능 |
-| Cloud Tasks Queue | `transcode-dev` | `transcode-prod` |
-
 Edge Function의 환경변수만 바꾸면 dev/prod 전환 가능.
 
 ---
