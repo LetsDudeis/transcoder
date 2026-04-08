@@ -214,10 +214,26 @@ Content-Type: application/json
 }
 ```
 
-참고: 이후 360p, 1080p, 2160p 등 추가 티어가 완료되면 master.m3u8이 자동 업데이트됩니다.
-별도 콜백은 없으며, 플레이어가 새로고침하면 고화질 옵션이 보임.
+#### 2. HLS 전체 완료 (모든 티어)
 
-#### 2. 트랜스코딩 실패
+모든 HLS 티어(360p, 720p, 1080p, 2160p) 인코딩 + 업로드가 완료되었을 때 발송.
+Supabase 큐에서 해당 Job을 "완료" 처리하는 데 사용.
+
+```json
+{
+  "type": "hls-complete",
+  "videoId": "abc123-def456-...",
+  "hlsUrl": "https://dev.perfectswing.app/hls/abc123-def456-.../master.m3u8",
+  "isDebug": false
+}
+```
+
+참고:
+- `hls-ready`와 `hls-complete`는 항상 이 순서로 발송됨 (동기)
+- 720p만 있는 영상은 `hls-ready` → `hls-complete` 연속 발송
+- 여러 티어가 있으면 `hls-ready` (720p 후) → 나머지 처리 → `hls-complete` (전체 후)
+
+#### 3. 트랜스코딩 실패
 
 ```json
 {

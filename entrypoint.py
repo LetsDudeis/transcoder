@@ -26,9 +26,12 @@ IS_DEBUG = os.environ.get("IS_DEBUG", "false").lower() == "true"
 SOURCE_URL = os.environ.get("SOURCE_URL")
 
 WORK_DIR = Path(f"/tmp/transcode/{VIDEO_ID}")
-HLS_DIR = Path(f"/mnt/hls/{VIDEO_ID}")       # 세그먼트(.ts) → GCS
+GCS_DIR = Path(f"/mnt/hls/{VIDEO_ID}")        # GCS 마운트
+HLS_DIR = GCS_DIR / "hls"                     # 세그먼트(.ts) → GCS
 HLS_LOCAL = WORK_DIR / "hls"                  # playlist(.m3u8) → 메모리
 INPUT_URL = SOURCE_URL or f"{R2_PUBLIC_BASE}/original-videos/{VIDEO_ID}.mp4"
+INPUT_FILE_RAM = WORK_DIR / "original.mp4"    # 원본 → RAM (빠름, 15GB 이하)
+MAX_RAM_DOWNLOAD = 15 * 1024 * 1024 * 1024    # 15GB
 
 # HLS 설정
 HLS_SEGMENT_SEC = 4
@@ -122,28 +125,51 @@ def get_s3_client():
 
 
 def prepare_workdir():
-    """작업 디렉토리 생성"""
+    """작업 디렉토리 생성 + 원본 다운로드"""
+    global INPUT_FILE
+
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    GCS_DIR.mkdir(parents=True, exist_ok=True)
     HLS_DIR.mkdir(parents=True, exist_ok=True)
     HLS_LOCAL.mkdir(parents=True, exist_ok=True)
-    print(f"Input: {INPUT_URL}")
+
+    # 파일 크기 확인 (S3 API로)
+    s3 = get_s3_client()
+    file_size = s3.head_object(Bucket=R2_BUCKET, Key=f"original-videos/{VIDEO_ID}.mp4")["ContentLength"]
+    print(f"Input: {INPUT_URL} ({file_size / 1024 / 1024:.0f}MB)")
+
+    # 15GB 이하 → RAM(/tmp), 초과 → URL 직접 읽기
+    if file_size <= MAX_RAM_DOWNLOAD:
+        INPUT_FILE = INPUT_FILE_RAM
+        print(f"Downloading to RAM...")
+    else:
+        INPUT_FILE = INPUT_URL  # ffmpeg가 URL 직접 읽기
+        print(f"File too large for RAM ({file_size / 1024 / 1024 / 1024:.1f}GB), using URL streaming")
+        return
+
+    t = time.time()
+    run(["curl", "-f", "-o", str(INPUT_FILE), "-C", "-",
+         "--retry", "5", "--retry-delay", "5", "--retry-max-time", "600", INPUT_URL])
+    if not Path(INPUT_FILE).exists() or Path(INPUT_FILE).stat().st_size == 0:
+        fail("Failed to download original video")
+    print(f"  [{time.time() - t:.1f}s] Downloaded: {Path(INPUT_FILE).stat().st_size / 1024 / 1024:.0f}MB")
 
 
 def analyze_video() -> dict:
     """영상 메타데이터 분석 (autorotate 적용 후 실제 해상도 기준)"""
     width = int(ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream=width",
-        "-of", "csv=p=0", INPUT_URL
+        "-of", "csv=p=0", str(INPUT_FILE)
     ]))
     height = int(ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream=height",
-        "-of", "csv=p=0", INPUT_URL
+        "-of", "csv=p=0", str(INPUT_FILE)
     ]))
 
     # 회전 메타데이터 확인
     rotation = ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream_tags=rotate",
-        "-of", "csv=p=0", INPUT_URL
+        "-of", "csv=p=0", str(INPUT_FILE)
     ]) or "0"
 
     if rotation in ("90", "270"):
@@ -154,7 +180,7 @@ def analyze_video() -> dict:
     # FPS 확인 및 정규화 (30 or 60)
     fps_raw = ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
-        "-of", "csv=p=0", INPUT_URL
+        "-of", "csv=p=0", str(INPUT_FILE)
     ])
     num, den = map(int, fps_raw.split("/"))
     original_fps = num / den
@@ -163,7 +189,7 @@ def analyze_video() -> dict:
     # 픽셀 포맷 확인 (10-bit 여부)
     pix_fmt = ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream=pix_fmt",
-        "-of", "csv=p=0", INPUT_URL
+        "-of", "csv=p=0", str(INPUT_FILE)
     ])
     is_10bit = "10" in pix_fmt  # yuv420p10le, p010le 등
 
@@ -198,7 +224,7 @@ def _select_audio_stream() -> dict:
     raw = ffprobe_value([
         "-show_entries", "stream=index,channels:stream_disposition=default",
         "-select_streams", "a",
-        "-of", "json", INPUT_URL
+        "-of", "json", str(INPUT_FILE)
     ])
     if not raw:
         return {"has_audio": False, "stream_index": None}
@@ -265,7 +291,7 @@ def encode_tier(tier: int, meta: dict):
 
     # GPU 디코드 + GPU 스케일
     cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "8"]
-    cmd += ["-i", INPUT_URL]
+    cmd += ["-i", str(INPUT_FILE)]
 
     # 오디오 없으면 무음 트랙 삽입
     if not meta["has_audio"]:
@@ -326,7 +352,7 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
 
     cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
     cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "8"]
-    cmd += ["-i", INPUT_URL]
+    cmd += ["-i", str(INPUT_FILE)]
 
     if not meta["has_audio"]:
         cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
@@ -468,24 +494,7 @@ def main():
             ExtraArgs={"ContentType": "application/vnd.apple.mpegurl", "CacheControl": "no-cache"},
         )
 
-    # 4. 720p 인코딩 + 나머지 1:N 인코딩을 병렬 시작
-    import threading
-
-    remaining_error = [None]
-
-    def encode_remaining():
-        try:
-            if remaining_tiers:
-                encode_tiers_1n(remaining_tiers, meta)
-        except SystemExit:
-            remaining_error[0] = "1:N encode failed"
-
-    # 나머지 티어 인코딩을 백그라운드 스레드로 시작
-    if remaining_tiers:
-        remaining_thread = threading.Thread(target=encode_remaining)
-        remaining_thread.start()
-
-    # 720p 인코딩 (메인 스레드, 우선순위)
+    # 4. 720p 먼저 인코딩 (단독, GPU 독점)
     t = time.time()
     encode_tier(720, meta)
     print(f"  [{time.time() - t:.1f}s] 720p encode")
@@ -498,11 +507,11 @@ def main():
     supabase_callback({"type": "hls-ready", "hlsUrl": hls_url})
     print(f"  [{time.time() - t:.1f}s] 720p upload + master + hls-ready callback")
 
-    # 5. 나머지 티어 완료 대기 + 업로드
+    # 5. 나머지 티어 1:N 인코딩 + 업로드 (720p 완료 후 시작)
     if remaining_tiers:
-        remaining_thread.join()
-        if remaining_error[0]:
-            fail(remaining_error[0])
+        t = time.time()
+        encode_tiers_1n(remaining_tiers, meta)
+        print(f"  [{time.time() - t:.1f}s] remaining tiers encode")
 
         t = time.time()
         for tier in remaining_tiers:
@@ -513,9 +522,13 @@ def main():
         upload_master(tiers)
         print(f"  [{time.time() - t:.1f}s] master.m3u8 updated with all tiers")
 
+    # hls-complete 콜백 (모든 티어 완료)
+    supabase_callback({"type": "hls-complete", "hlsUrl": hls_url})
+    print(f"  hls-complete callback sent")
+
     # 6. 정리
     shutil.rmtree(WORK_DIR, ignore_errors=True)
-    shutil.rmtree(HLS_DIR, ignore_errors=True)
+    shutil.rmtree(GCS_DIR, ignore_errors=True)
 
     print(f"Transcoding complete for video: {VIDEO_ID} [{time.time() - t_start:.1f}s total]")
     print(f"  HLS: {hls_url}")
