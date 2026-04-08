@@ -100,11 +100,11 @@ def run(cmd: list[str], **kwargs):
         proc.wait()
         if proc.returncode != 0:
             stderr = proc.stderr.read()
-            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {stderr[-500:]}")
+            fail(f"ffmpeg error: {stderr.strip()}")
     else:
         result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
         if result.returncode != 0:
-            fail(f"Command failed: {' '.join(cmd[:3])}... stderr: {result.stderr[-500:]}")
+            fail(f"Command failed ({cmd[0]}): {result.stderr.strip()}")
         return result
 
 
