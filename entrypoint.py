@@ -73,9 +73,10 @@ def fail(msg: str):
     """에러 콜백 보내고 종료"""
     print(f"ERROR: {msg}")
     supabase_callback({"type": "transcode-failed", "error": msg})
-    # GCS/로컬 정리
+    # 로컬 정리 (GCS HLS는 서빙 중일 수 있으므로 유지, 원본만 삭제)
     shutil.rmtree(WORK_DIR, ignore_errors=True)
-    shutil.rmtree(GCS_DIR, ignore_errors=True)
+    if INPUT_FILE_RAM.exists():
+        INPUT_FILE_RAM.unlink(missing_ok=True)
     sys.exit(0)
 
 
@@ -437,24 +438,11 @@ def generate_master_m3u8(tiers: list[int], meta: dict):
     print("Generated master.m3u8")
 
 
-def upload_tier(s3, tier: int):
-    """단일 HLS 티어를 R2에 병렬 업로드 (세그먼트: GCS, playlist: 로컬)"""
-    seg_dir = HLS_DIR / f"{tier}p"
-    playlist_dir = HLS_LOCAL / f"{tier}p"
-    prefix = f"hls/{VIDEO_ID}/{tier}p"
-
-    files = []
-    # 세그먼트(.ts)는 GCS에서
-    files += [(f, "video/MP2T") for f in sorted(seg_dir.iterdir()) if f.suffix == ".ts"]
-    # playlist(.m3u8)는 로컬에서
-    files += [(f, "application/vnd.apple.mpegurl") for f in sorted(playlist_dir.iterdir()) if f.suffix == ".m3u8"]
-
-    def _upload(item):
-        f, ct = item
-        s3.upload_file(str(f), R2_BUCKET, f"{prefix}/{f.name}", ExtraArgs={"ContentType": ct, "CacheControl": "public, max-age=2592000"})
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(_upload, files))
+def publish_tier(tier: int):
+    """playlist를 GCS에 복사 (세그먼트는 이미 GCS에 있음)"""
+    playlist_src = HLS_LOCAL / f"{tier}p" / "playlist.m3u8"
+    playlist_dst = HLS_DIR / f"{tier}p" / "playlist.m3u8"
+    shutil.copy2(str(playlist_src), str(playlist_dst))
 
 
 def check_gpu():
@@ -497,32 +485,34 @@ def main():
     tiers = determine_tiers(meta["long_side"])
     print(f"HLS tiers: {tiers}")
 
-    s3 = get_s3_client()
     remaining_tiers = [t for t in tiers if t != 720]
 
-    def upload_master(tier_list):
+    HLS_PUBLIC_BASE = os.environ.get("HLS_PUBLIC_BASE", "https://hls.perfectswing.app")
+
+    def publish_master(tier_list):
         generate_master_m3u8(tier_list, meta)
-        s3.upload_file(
-            str(HLS_LOCAL / "master.m3u8"),
-            R2_BUCKET,
-            f"hls/{VIDEO_ID}/master.m3u8",
-            ExtraArgs={"ContentType": "application/vnd.apple.mpegurl", "CacheControl": "no-cache"},
-        )
+        # master.m3u8을 GCS에 업로드 (Cache-Control: no-cache 설정)
+        from google.cloud import storage
+        gcs = storage.Client()
+        bucket = gcs.bucket("perfectswing-transcoder-scratch")
+        blob = bucket.blob(f"{VIDEO_ID}/hls/master.m3u8")
+        blob.cache_control = "no-cache"
+        blob.upload_from_filename(str(HLS_LOCAL / "master.m3u8"), content_type="application/vnd.apple.mpegurl")
 
     # 4. 720p 먼저 인코딩 (단독, GPU 독점)
     t = time.time()
     encode_tier(720, meta)
     print(f"  [{time.time() - t:.1f}s] 720p encode")
 
-    # 720p 업로드 + 임시 master.m3u8 (720p만) + hls-ready 콜백
+    # 720p publish + 임시 master.m3u8 (720p만) + hls-ready 콜백
     t = time.time()
-    upload_tier(s3, 720)
-    upload_master([720])
-    hls_url = f"{R2_PUBLIC_BASE}/hls/{VIDEO_ID}/master.m3u8"
+    publish_tier(720)
+    publish_master([720])
+    hls_url = f"{HLS_PUBLIC_BASE}/{VIDEO_ID}/hls/master.m3u8"
     supabase_callback({"type": "hls-ready", "hlsUrl": hls_url})
-    print(f"  [{time.time() - t:.1f}s] 720p upload + master + hls-ready callback")
+    print(f"  [{time.time() - t:.1f}s] 720p publish + hls-ready callback")
 
-    # 5. 나머지 티어 1:N 인코딩 + 업로드 (720p 완료 후 시작)
+    # 5. 나머지 티어 1:N 인코딩 (720p 완료 후 시작)
     if remaining_tiers:
         try:
             t = time.time()
@@ -531,27 +521,28 @@ def main():
 
             t = time.time()
             for tier in remaining_tiers:
-                upload_tier(s3, tier)
-                print(f"  [{time.time() - t:.1f}s] {tier}p upload")
+                publish_tier(tier)
+                print(f"  [{time.time() - t:.1f}s] {tier}p publish")
 
             # master.m3u8을 전체 티어로 업데이트
-            upload_master(tiers)
+            publish_master(tiers)
             print(f"  [{time.time() - t:.1f}s] master.m3u8 updated with all tiers")
         except SystemExit:
             # 720p는 이미 공유 가능, 나머지만 실패 → failed 보내고 종료
             print("WARNING: remaining tiers failed, but 720p is available")
             supabase_callback({"type": "transcode-failed", "error": "remaining tiers failed (720p available)"})
             shutil.rmtree(WORK_DIR, ignore_errors=True)
-            shutil.rmtree(GCS_DIR, ignore_errors=True)
             return
 
     # hls-complete 콜백 (모든 티어 완료)
     supabase_callback({"type": "hls-complete", "hlsUrl": hls_url})
     print(f"  hls-complete callback sent")
 
-    # 6. 정리
+    # 6. 정리 (로컬만, GCS의 HLS는 서빙 중이므로 유지)
     shutil.rmtree(WORK_DIR, ignore_errors=True)
-    shutil.rmtree(GCS_DIR, ignore_errors=True)
+    # 원본만 GCS에서 삭제
+    if INPUT_FILE != INPUT_URL:
+        Path(INPUT_FILE).unlink(missing_ok=True)
 
     print(f"Transcoding complete for video: {VIDEO_ID} [{time.time() - t_start:.1f}s total]")
     print(f"  HLS: {hls_url}")

@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     curl ca-certificates \
     python3 python3-pip \
-    && pip3 install --no-cache-dir boto3 \
+    && pip3 install --no-cache-dir boto3 google-cloud-storage \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
