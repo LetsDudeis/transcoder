@@ -235,6 +235,7 @@ def analyze_video() -> dict:
         "output_fps": output_fps,
         "is_10bit": is_10bit,
         "has_rotation": has_rotation,
+        "rotation": rotation,
         "has_audio": audio_info["has_audio"],
         "audio_stream_index": audio_info["stream_index"],
     }
@@ -280,18 +281,39 @@ def determine_tiers(long_side: int) -> list[int]:
     return tiers
 
 
-def get_scale_filter(tier: int, is_landscape: bool, is_10bit: bool = False, has_rotation: bool = False) -> str:
-    """scale_cuda 필터 문자열 생성
-    - has_rotation: rotation 메타데이터 있으면 원본 프레임 기준으로 스케일 (회전 전)
+def get_scale_filter(tier: int, meta: dict) -> str:
+    """GPU 필터 체인 생성 (스케일 + 회전 + 10-bit 변환, 전부 GPU 내)
+
+    최적화: 스케일/포맷변환 먼저 → 작아진 프레임을 회전 (GPU 연산량 절약)
+    - rotation 있으면: scale_cuda(축소+8bit) → transpose_npp(회전)
+    - rotation 없으면: scale_cuda(축소+8bit)
     """
     long = TIER_SPECS[tier]["long_side"]
-    fmt = ":format=nv12" if is_10bit else ""
-    # rotation 있으면 ffmpeg 프레임이 회전 전이라 스케일 방향 반전
-    landscape = is_landscape if not has_rotation else not is_landscape
-    if landscape:
-        return f"scale_cuda=w={long}:h=-2{fmt}"
+    is_landscape = meta["is_landscape"]
+    is_10bit = meta.get("is_10bit", False)
+    has_rotation = meta.get("has_rotation", False)
+    rotation = meta.get("rotation", "0")
+
+    if has_rotation:
+        # transpose_npp는 yuv420p만 지원 → 10-bit이면 yuv420p로 변환
+        fmt = ":format=yuv420p" if is_10bit else ""
+
+        # 회전 전 원본 프레임 기준으로 스케일 (방향 반전)
+        # 스케일 + 포맷 변환을 한번에 → 작아진 프레임을 회전
+        if is_landscape:
+            scale = f"scale_cuda=w=-2:h={long}{fmt}"
+        else:
+            scale = f"scale_cuda=w={long}:h=-2{fmt}"
+
+        transpose = "transpose_npp=clock" if rotation == "90" else "transpose_npp=cclock"
+        return f"{scale},{transpose}"
     else:
-        return f"scale_cuda=w=-2:h={long}{fmt}"
+        # 회전 없음 — 단순 스케일
+        fmt = ":format=nv12" if is_10bit else ""
+        if is_landscape:
+            return f"scale_cuda=w={long}:h=-2{fmt}"
+        else:
+            return f"scale_cuda=w=-2:h={long}{fmt}"
 
 
 def get_resolution_string(tier: int, is_landscape: bool) -> str:
@@ -310,7 +332,7 @@ def encode_tier(tier: int, meta: dict):
     seg_dir.mkdir(parents=True, exist_ok=True)
     playlist_dir.mkdir(parents=True, exist_ok=True)
 
-    scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False), meta.get("has_rotation", False))
+    scale = get_scale_filter(tier, meta)
     spec = TIER_SPECS[tier]
 
     print(f"Encoding HLS {tier}p...")
@@ -390,7 +412,7 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
 
     for tier in tiers:
         spec = TIER_SPECS[tier]
-        scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False), meta.get("has_rotation", False))
+        scale = get_scale_filter(tier, meta)
         seg_dir = HLS_DIR / f"{tier}p"
         playlist_dir = HLS_LOCAL / f"{tier}p"
 
