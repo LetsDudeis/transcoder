@@ -225,6 +225,8 @@ def analyze_video() -> dict:
           f"effective: {eff_w}x{eff_h}, fps: {original_fps:.2f}->{output_fps}, "
           f"pix_fmt: {pix_fmt}, 10bit: {is_10bit}, audio: {audio_info}")
 
+    has_rotation = rotation in ("90", "270")
+
     return {
         "eff_w": eff_w,
         "eff_h": eff_h,
@@ -232,6 +234,7 @@ def analyze_video() -> dict:
         "long_side": long_side,
         "output_fps": output_fps,
         "is_10bit": is_10bit,
+        "has_rotation": has_rotation,
         "has_audio": audio_info["has_audio"],
         "audio_stream_index": audio_info["stream_index"],
     }
@@ -277,12 +280,15 @@ def determine_tiers(long_side: int) -> list[int]:
     return tiers
 
 
-def get_scale_filter(tier: int, is_landscape: bool, is_10bit: bool = False) -> str:
-    """scale_cuda 필터 문자열 생성 (10-bit 입력 + H.264 출력 시 nv12 변환 포함)"""
+def get_scale_filter(tier: int, is_landscape: bool, is_10bit: bool = False, has_rotation: bool = False) -> str:
+    """scale_cuda 필터 문자열 생성
+    - has_rotation: rotation 메타데이터 있으면 원본 프레임 기준으로 스케일 (회전 전)
+    """
     long = TIER_SPECS[tier]["long_side"]
-    # 10-bit 입력은 항상 8-bit(nv12)로 변환 (HLS 호환성)
     fmt = ":format=nv12" if is_10bit else ""
-    if is_landscape:
+    # rotation 있으면 ffmpeg 프레임이 회전 전이라 스케일 방향 반전
+    landscape = is_landscape if not has_rotation else not is_landscape
+    if landscape:
         return f"scale_cuda=w={long}:h=-2{fmt}"
     else:
         return f"scale_cuda=w=-2:h={long}{fmt}"
@@ -304,12 +310,12 @@ def encode_tier(tier: int, meta: dict):
     seg_dir.mkdir(parents=True, exist_ok=True)
     playlist_dir.mkdir(parents=True, exist_ok=True)
 
-    scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False))
+    scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False), meta.get("has_rotation", False))
     spec = TIER_SPECS[tier]
 
     print(f"Encoding HLS {tier}p...")
 
-    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-noautorotate"]
 
     # GPU 디코드 + GPU 스케일
     cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "8"]
@@ -372,7 +378,7 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
 
     print(f"Encoding HLS 1:N {tiers}...")
 
-    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-noautorotate"]
     cmd += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "8"]
     cmd += ["-i", str(INPUT_FILE)]
 
@@ -384,7 +390,7 @@ def encode_tiers_1n(tiers: list[int], meta: dict):
 
     for tier in tiers:
         spec = TIER_SPECS[tier]
-        scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False))
+        scale = get_scale_filter(tier, meta["is_landscape"], meta.get("is_10bit", False), meta.get("has_rotation", False))
         seg_dir = HLS_DIR / f"{tier}p"
         playlist_dir = HLS_LOCAL / f"{tier}p"
 
