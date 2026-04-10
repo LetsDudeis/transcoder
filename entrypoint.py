@@ -139,9 +139,13 @@ def prepare_workdir():
     global INPUT_FILE
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    HLS_LOCAL.mkdir(parents=True, exist_ok=True)
+
+    # GCS에 이전 실행의 HLS 파일이 있으면 삭제 (세그먼트 섞임 방지)
+    if GCS_DIR.exists():
+        shutil.rmtree(GCS_DIR, ignore_errors=True)
     GCS_DIR.mkdir(parents=True, exist_ok=True)
     HLS_DIR.mkdir(parents=True, exist_ok=True)
-    HLS_LOCAL.mkdir(parents=True, exist_ok=True)
 
     # 파일 크기 확인 (S3 API로)
     s3 = get_s3_client()
@@ -305,7 +309,8 @@ def get_scale_filter(tier: int, meta: dict) -> str:
         else:
             scale = f"scale_cuda=w={long}:h=-2{fmt}"
 
-        transpose = "transpose_npp=clock" if rotation == "90" else "transpose_npp=cclock"
+        # rotation=90 → 되돌리려면 반시계(cclock), rotation=270 → 시계(clock)
+        transpose = "transpose_npp=cclock" if rotation == "90" else "transpose_npp=clock"
         return f"{scale},{transpose}"
     else:
         # 회전 없음 — 단순 스케일
