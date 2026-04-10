@@ -299,8 +299,8 @@ def get_scale_filter(tier: int, meta: dict) -> str:
     rotation = meta.get("rotation", "0")
 
     if has_rotation:
-        # transpose_npp는 yuv420p만 지원 → 10-bit이면 yuv420p로 변환
-        fmt = ":format=yuv420p" if is_10bit else ""
+        # transpose_npp는 yuv420p만 지원 → 항상 yuv420p 강제
+        fmt = ":format=yuv420p"
 
         if rotation == "180":
             # 180도: w/h 안 바뀜, transpose 2번으로 처리
