@@ -196,7 +196,7 @@ def analyze_video() -> dict:
             "-select_streams", "v:0", "-show_entries", "stream_side_data=rotation",
             "-of", "csv=p=0", str(INPUT_FILE)
         ])
-    rotation = str(int(float(rotation))) if rotation else "0"
+    rotation = str(abs(int(float(rotation)))) if rotation else "0"
 
     if rotation in ("90", "270"):
         eff_w, eff_h = height, width
