@@ -15,7 +15,7 @@ RUN git clone --branch n12.1.14.0 --depth 1 \
     && cd /tmp/nv-codec-headers && make install
 
 # FFmpeg 7.1 소스 빌드 (NVENC + CUDA 필터 포함)
-RUN git clone --branch release/7.1 --depth 1 \
+RUN git clone --branch release/6.1 --depth 1 \
     https://git.ffmpeg.org/ffmpeg.git /tmp/ffmpeg \
     && cd /tmp/ffmpeg \
     && ./configure \

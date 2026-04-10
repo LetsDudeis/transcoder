@@ -182,11 +182,17 @@ def analyze_video() -> dict:
         "-of", "csv=p=0", str(INPUT_FILE)
     ]))
 
-    # 회전 메타데이터 확인
+    # 회전 메타데이터 확인 (tags 또는 side_data)
     rotation = ffprobe_value([
         "-select_streams", "v:0", "-show_entries", "stream_tags=rotate",
         "-of", "csv=p=0", str(INPUT_FILE)
-    ]) or "0"
+    ])
+    if not rotation:
+        rotation = ffprobe_value([
+            "-select_streams", "v:0", "-show_entries", "stream_side_data=rotation",
+            "-of", "csv=p=0", str(INPUT_FILE)
+        ])
+    rotation = str(int(float(rotation))) if rotation else "0"
 
     if rotation in ("90", "270"):
         eff_w, eff_h = height, width
