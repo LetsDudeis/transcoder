@@ -229,7 +229,7 @@ def analyze_video() -> dict:
           f"effective: {eff_w}x{eff_h}, fps: {original_fps:.2f}->{output_fps}, "
           f"pix_fmt: {pix_fmt}, 10bit: {is_10bit}, audio: {audio_info}")
 
-    has_rotation = rotation in ("90", "270")
+    has_rotation = rotation in ("90", "180", "270")
 
     return {
         "eff_w": eff_w,
@@ -302,16 +302,21 @@ def get_scale_filter(tier: int, meta: dict) -> str:
         # transpose_npp는 yuv420p만 지원 → 10-bit이면 yuv420p로 변환
         fmt = ":format=yuv420p" if is_10bit else ""
 
-        # 회전 전 원본 프레임 기준으로 스케일 (방향 반전)
-        # 스케일 + 포맷 변환을 한번에 → 작아진 프레임을 회전
-        if is_landscape:
-            scale = f"scale_cuda=w=-2:h={long}{fmt}"
+        if rotation == "180":
+            # 180도: w/h 안 바뀜, transpose 2번으로 처리
+            if is_landscape:
+                scale = f"scale_cuda=w={long}:h=-2{fmt}"
+            else:
+                scale = f"scale_cuda=w=-2:h={long}{fmt}"
+            return f"{scale},transpose_npp=cclock,transpose_npp=cclock"
         else:
-            scale = f"scale_cuda=w={long}:h=-2{fmt}"
-
-        # rotation=90 → 되돌리려면 반시계(cclock), rotation=270 → 시계(clock)
-        transpose = "transpose_npp=cclock" if rotation == "90" else "transpose_npp=clock"
-        return f"{scale},{transpose}"
+            # 90/270도: 회전 전 원본 프레임 기준으로 스케일 (방향 반전)
+            if is_landscape:
+                scale = f"scale_cuda=w=-2:h={long}{fmt}"
+            else:
+                scale = f"scale_cuda=w={long}:h=-2{fmt}"
+            transpose = "transpose_npp=cclock" if rotation == "90" else "transpose_npp=clock"
+            return f"{scale},{transpose}"
     else:
         # 회전 없음 — 단순 스케일
         fmt = ":format=nv12" if is_10bit else ""
