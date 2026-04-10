@@ -196,9 +196,11 @@ def analyze_video() -> dict:
             "-select_streams", "v:0", "-show_entries", "stream_side_data=rotation",
             "-of", "csv=p=0", str(INPUT_FILE)
         ])
-    rotation = str(abs(int(float(rotation)))) if rotation else "0"
+    rotation = int(float(rotation)) if rotation else 0
+    # 음수를 양수로 정규화: -90 → 270, -180 → 180, -270 → 90
+    rotation = rotation % 360
 
-    if rotation in ("90", "270"):
+    if rotation in (90, 270):
         eff_w, eff_h = height, width
     else:
         eff_w, eff_h = width, height
@@ -229,7 +231,7 @@ def analyze_video() -> dict:
           f"effective: {eff_w}x{eff_h}, fps: {original_fps:.2f}->{output_fps}, "
           f"pix_fmt: {pix_fmt}, 10bit: {is_10bit}, audio: {audio_info}")
 
-    has_rotation = rotation in ("90", "180", "270")
+    has_rotation = rotation in (90, 180, 270)
 
     return {
         "eff_w": eff_w,
@@ -302,7 +304,7 @@ def get_scale_filter(tier: int, meta: dict) -> str:
         # transpose_npp는 yuv420p만 지원 → 항상 yuv420p 강제
         fmt = ":format=yuv420p"
 
-        if rotation == "180":
+        if rotation == 180:
             # 180도: w/h 안 바뀜, transpose 2번으로 처리
             if is_landscape:
                 scale = f"scale_cuda=w={long}:h=-2{fmt}"
@@ -315,7 +317,7 @@ def get_scale_filter(tier: int, meta: dict) -> str:
                 scale = f"scale_cuda=w=-2:h={long}{fmt}"
             else:
                 scale = f"scale_cuda=w={long}:h=-2{fmt}"
-            transpose = "transpose_npp=cclock" if rotation == "90" else "transpose_npp=clock"
+            transpose = "transpose_npp=cclock" if rotation == 90 else "transpose_npp=clock"
             return f"{scale},{transpose}"
     else:
         # 회전 없음 — 단순 스케일
